@@ -4,8 +4,17 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
+
+// Opt-in fused lightning-indexer scoring path (default OFF). When enabled, the generic
+// score chain (mul_mat -> relu -> weight -> sum_rows) is replaced by the single fused
+// ggml_lightning_indexer op. Byte-identical default behavior when unset.
+static bool deepseek4_fused_indexer_enabled() {
+    const char * value = getenv("LF_DS4_FUSED_INDEXER");
+    return value && atoi(value) != 0;
+}
 
 static float dsv4_rope_attn_factor(float freq_scale, float ext_factor) {
     if (ext_factor == 0.0f) {
@@ -582,22 +591,35 @@ ggml_tensor * llama_model_deepseek4::graph::build_lid_top_k(
             indexer_weights->ne[0], indexer_weights->ne[1]/n_stream, indexer_weights->ne[2], n_stream,
             indexer_weights->nb[1], indexer_weights->nb[2]/n_stream, indexer_weights->nb[3]/n_stream, 0);
 
-    indexer_q = ggml_permute(ctx0, indexer_q, 0, 2, 1, 3);
-    cb(indexer_q, "lid_q", il);
-    indexer_k = ggml_permute(ctx0, indexer_k, 0, 2, 1, 3);
-    cb(indexer_k, "lid_k", il);
+    ggml_tensor * indexer_score;
 
-    ggml_tensor * indexer_kq = ggml_mul_mat(ctx0, indexer_k, indexer_q);
-    cb(indexer_kq, "lid_kq", il);
+    static const bool fused_lid = deepseek4_fused_indexer_enabled();
 
-    indexer_kq = ggml_cont(ctx0, ggml_permute(ctx0, indexer_kq, 2, 1, 0, 3));
-    cb(indexer_kq, "lid_kq", il);
+    if (fused_lid) {
+        // indexer_weights is already pre-scaled by 1/sqrt(n_embd_indexer_head*n_indexer_head)
+        // above, so unit scales reproduce the generic chain exactly (relu is positively
+        // homogeneous: scale_embd*scale_heads folds into the weight pre-scale).
+        indexer_score = ggml_lightning_indexer(ctx0, indexer_q, indexer_k, indexer_weights,
+                /*scale_embd=*/1.0f, /*scale_heads=*/1.0f);
+        cb(indexer_score, "lid_score", il);
+    } else {
+        indexer_q = ggml_permute(ctx0, indexer_q, 0, 2, 1, 3);
+        cb(indexer_q, "lid_q", il);
+        indexer_k = ggml_permute(ctx0, indexer_k, 0, 2, 1, 3);
+        cb(indexer_k, "lid_k", il);
 
-    ggml_tensor * indexer_score = ggml_relu(ctx0, indexer_kq);
-    indexer_score = ggml_mul(ctx0, indexer_score, indexer_weights);
-    indexer_score = ggml_sum_rows(ctx0, indexer_score);
-    indexer_score = ggml_cont(ctx0, ggml_permute(ctx0, indexer_score, 2, 1, 0, 3));
-    cb(indexer_score, "lid_score", il);
+        ggml_tensor * indexer_kq = ggml_mul_mat(ctx0, indexer_k, indexer_q);
+        cb(indexer_kq, "lid_kq", il);
+
+        indexer_kq = ggml_cont(ctx0, ggml_permute(ctx0, indexer_kq, 2, 1, 0, 3));
+        cb(indexer_kq, "lid_kq", il);
+
+        indexer_score = ggml_relu(ctx0, indexer_kq);
+        indexer_score = ggml_mul(ctx0, indexer_score, indexer_weights);
+        indexer_score = ggml_sum_rows(ctx0, indexer_score);
+        indexer_score = ggml_cont(ctx0, ggml_permute(ctx0, indexer_score, 2, 1, 0, 3));
+        cb(indexer_score, "lid_score", il);
+    }
 
     indexer_score = ggml_add(ctx0, indexer_score, inp_lid.kq_mask);
     cb(indexer_score, "lid_score_masked", il);
