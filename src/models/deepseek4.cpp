@@ -15,6 +15,36 @@ static float dsv4_rope_attn_factor(float freq_scale, float ext_factor) {
     return 1.0f / (1.0f + 0.1f*logf(1.0f/freq_scale));
 }
 
+// Apply a block-diagonal (Hadamard incoherence) rotation to a tensor whose
+// dim-0 is a multiple of the rotation width n = rot->ne[0]. The tensor is
+// reshaped into n-wide blocks, the n x n matrix is applied to every block, and
+// the original shape is restored. This is the block semantics the standard
+// (llama-graph.cpp) attention path uses for self_k_rot/self_v_rot; DeepSeek-V4's
+// attention builders need the SAME semantics (a plain ggml_mul_mat would demand
+// rot->ne[0] == cur->ne[0], which is false for the 576-wide MLA head and a 64
+// rotation block). rot is a symmetric involution (rot*rot == I), so the same
+// call un-rotates an attention output. Mirrors the file-local helpers in
+// llama-graph.cpp and llama-kv-cache.cpp.
+static ggml_tensor * ggml_mul_mat_aux(
+        ggml_context * ctx,
+        ggml_tensor * cur,
+        ggml_tensor * rot) {
+    const auto n = rot->ne[0];
+
+    ggml_tensor * res;
+
+    if (!ggml_is_contiguous(cur)) {
+        res = ggml_cont_2d   (ctx, cur, n, ggml_nelements(cur)/n);
+    } else {
+        res = ggml_reshape_2d(ctx, cur, n, ggml_nelements(cur)/n);
+    }
+    res = ggml_mul_mat   (ctx, rot, res);
+    ggml_mul_mat_set_hint(res, GGML_HINT_SRC0_IS_HADAMARD);
+    res = ggml_reshape_4d(ctx, res, cur->ne[0], cur->ne[1], cur->ne[2], cur->ne[3]);
+
+    return res;
+}
+
 void llama_model_deepseek4::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
     ml.get_key(LLM_KV_ATTENTION_Q_LORA_RANK,       hparams.n_lora_q);
@@ -652,9 +682,20 @@ ggml_tensor * llama_model_deepseek4::graph::build_csa_lid_attention(
         int il) const {
     const auto & inp_csa = inp_dsv4->get_csa();
     GGML_ASSERT(inp_csa.kq_mask);
-    GGML_ASSERT(inp_attn->self_k_rot == nullptr);
 
     ggml_tensor * top_k = build_lid_top_k(model, inp_dsv4, qr, cur, inp_pos, il);
+
+    // Rotation-aware sparse attention. With a quantized K-cache the raw and CSA
+    // K rows are stored in the block-Hadamard incoherence basis (self_k_rot is a
+    // shared 64-block matrix for the 576-wide MLA head; the CSA store is rotated
+    // in build_attention). Rotate Q the same way so K.Q is preserved, then
+    // un-rotate the attention output (self_k_rot is an involution). The lightning
+    // indexer above uses its own rotation (lid.k_rot) on qr and is unaffected.
+    ggml_tensor * k_rot = inp_attn->self_k_rot;
+    if (k_rot) {
+        q  = ggml_mul_mat_aux(ctx0, q,  k_rot);
+        kv = ggml_mul_mat_aux(ctx0, kv, k_rot);
+    }
 
     ggml_build_forward_expand(gf, q);
     ggml_build_forward_expand(gf, kv);
@@ -696,6 +737,9 @@ ggml_tensor * llama_model_deepseek4::graph::build_csa_lid_attention(
 
     ggml_tensor * kq_b = dsv4_build_kq_zero_bias(ctx0, cparams, kq_mask, q->ne[1]);
     ggml_tensor * out = build_attn_mha(q, k_all, k_all, kq_b, kq_mask, sinks, nullptr, kq_scale, il);
+    if (k_rot) {
+        out = ggml_mul_mat_aux(ctx0, out, k_rot);
+    }
     cb(out, "attn_csa_lid", il);
 
     return out;
@@ -711,7 +755,16 @@ ggml_tensor * llama_model_deepseek4::graph::build_hca_attention(
         int il) const {
     const auto & inp_hca = inp_dsv4->get_hca();
     GGML_ASSERT(inp_hca.kq_mask);
-    GGML_ASSERT(inp_attn->self_k_rot == nullptr);
+
+    // Rotation-aware sparse attention (see build_csa_lid_attention): with a
+    // quantized K-cache the raw and HCA K rows are stored rotated (shared 64-block
+    // self_k_rot; the HCA store is rotated in build_attention). Rotate Q to match
+    // and un-rotate the output.
+    ggml_tensor * k_rot = inp_attn->self_k_rot;
+    if (k_rot) {
+        q  = ggml_mul_mat_aux(ctx0, q,  k_rot);
+        kv = ggml_mul_mat_aux(ctx0, kv, k_rot);
+    }
 
     ggml_build_forward_expand(gf, q);
     ggml_build_forward_expand(gf, kv);
@@ -753,6 +806,9 @@ ggml_tensor * llama_model_deepseek4::graph::build_hca_attention(
 
     ggml_tensor * kq_b = dsv4_build_kq_zero_bias(ctx0, cparams, kq_mask, q->ne[1]);
     ggml_tensor * out = build_attn_mha(q, k_all, k_all, kq_b, kq_mask, sinks, nullptr, kq_scale, il);
+    if (k_rot) {
+        out = ggml_mul_mat_aux(ctx0, out, k_rot);
+    }
     cb(out, "attn_hca", il);
 
     return out;
@@ -770,8 +826,13 @@ ggml_tensor * llama_model_deepseek4::graph::build_raw_attention(
     ggml_tensor * k_rot = inp_attn->self_k_rot;
 
     if (k_rot) {
-        q  = ggml_mul_mat(ctx0, k_rot, q);
-        kv = ggml_mul_mat(ctx0, k_rot, kv);
+        // Rotate Q and K into the incoherence basis using block semantics
+        // (ggml_mul_mat_aux applies the k_rot->ne[0]-wide Hadamard to each block
+        // of the 576-wide MLA head). The rotated K is what gets stored in the
+        // quantized cache; rotating Q the same way preserves K.Q. A plain
+        // ggml_mul_mat here is a shape error (64 vs 576) and does not rotate.
+        q  = ggml_mul_mat_aux(ctx0, q,  k_rot);
+        kv = ggml_mul_mat_aux(ctx0, kv, k_rot);
     }
 
     ggml_build_forward_expand(gf, q);
@@ -787,7 +848,13 @@ ggml_tensor * llama_model_deepseek4::graph::build_raw_attention(
     k = dsv4_repeat_streams(ctx0, k, kq_mask->ne[3]);
 
     ggml_tensor * kq_b = dsv4_build_kq_zero_bias(ctx0, cparams, kq_mask, q->ne[1]);
+    // V is the same rotated K (build_attn_mha(q, k, k, ...)), so the attention
+    // output lives in the rotated basis. Un-rotate it (k_rot is an involution)
+    // before it is de-roped and fed to the output projection.
     ggml_tensor * out = build_attn_mha(q, k, k, kq_b, kq_mask, sinks, nullptr, kq_scale, il);
+    if (k_rot) {
+        out = ggml_mul_mat_aux(ctx0, out, k_rot);
+    }
     cb(out, "attn_raw", il);
 
     return out;
@@ -917,8 +984,17 @@ ggml_tensor * llama_model_deepseek4::graph::build_attention(
                 "csa_state_compress",
                 il);
 
+        // Store the compressed CSA K rotated into the incoherence basis when the
+        // cache is quantized, matching the raw-K rotation so the shared 64-block
+        // self_k_rot un-rotates the CSA attention output. The compressor STATE
+        // (csa_state_kv, persisted below) must stay UN-rotated, so rotate a
+        // separate copy used only for the cache write.
+        ggml_tensor * csa_cache_k = kv_comp_csa_state;
+        if (inp_attn->self_k_rot) {
+            csa_cache_k = ggml_mul_mat_aux(ctx0, kv_comp_csa_state, inp_attn->self_k_rot);
+        }
         ggml_build_forward_expand(gf, inp_dsv4->mctx->get_csa()->cpy_k(ctx0,
-                    kv_comp_csa_state, inp_dsv4->get_csa().state_write_idxs, il));
+                    csa_cache_k, inp_dsv4->get_csa().state_write_idxs, il));
 
         csa_state_kv    = dsv4_with_zero_dep(ctx0, csa_state_kv,    kv_comp_csa_state);
         csa_state_score = dsv4_with_zero_dep(ctx0, csa_state_score, kv_comp_csa_state);
@@ -1007,8 +1083,14 @@ ggml_tensor * llama_model_deepseek4::graph::build_attention(
                 "hca_state_compress",
                 il);
 
+        // Store the compressed HCA K rotated into the incoherence basis (see the
+        // CSA store above): rotate a copy for the cache write only.
+        ggml_tensor * hca_cache_k = kv_comp_hca;
+        if (inp_attn->self_k_rot) {
+            hca_cache_k = ggml_mul_mat_aux(ctx0, kv_comp_hca, inp_attn->self_k_rot);
+        }
         ggml_build_forward_expand(gf, inp_dsv4->mctx->get_hca()->cpy_k(ctx0,
-                    kv_comp_hca, inp_dsv4->get_hca().state_write_idxs, il));
+                    hca_cache_k, inp_dsv4->get_hca().state_write_idxs, il));
         hca_state_dep = kv_comp_hca;
     }
 
@@ -1031,17 +1113,19 @@ ggml_tensor * llama_model_deepseek4::graph::build_attention(
         ggml_build_forward_expand(gf, hca_state_score);
     }
 
+    // Note: build_csa_lid_attention / build_hca_attention are now rotation-aware
+    // (they apply self_k_rot to Q and the stored K and un-rotate the output), so a
+    // non-null self_k_rot (quantized K-cache) no longer diverts these layers to the
+    // dense build_raw_attention fallback.
     ggml_tensor * out = nullptr;
     if (ratio == DSV4_CSA_RATIO &&
             inp_dsv4->get_csa().kq_mask &&
             inp_dsv4->get_lid().kq_mask &&
-            inp_dsv4->get_lid().k_rot &&
-            inp_attn->self_k_rot == nullptr) {
+            inp_dsv4->get_lid().k_rot) {
         out = build_csa_lid_attention(model, inp_dsv4, inp_attn, q, kv, qr, cur, inp_pos, layer.attn_sinks,
                 1.0f/sqrtf(float(n_embd_head)), il);
     } else if (ratio == DSV4_HCA_RATIO &&
-            inp_dsv4->get_hca().kq_mask &&
-            inp_attn->self_k_rot == nullptr) {
+            inp_dsv4->get_hca().kq_mask) {
         out = build_hca_attention(inp_dsv4, inp_attn, q, kv, layer.attn_sinks,
                 1.0f/sqrtf(float(n_embd_head)), il);
     } else {
