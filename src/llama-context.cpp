@@ -3561,13 +3561,17 @@ llama_context * llama_init_from_model(
             }
         }
 
+        // Previously this rejected a quantized K-cache for DeepSeek-V4 MLA on Volta, on the (wrong)
+        // theory of an sm_70 kernel defect. Root cause is actually backend-independent: a quantized
+        // K/V cache enabled the Hadamard attention rotation, which forced the model off its sparse
+        // attention onto a broken raw path (garbage on CPU and every GPU). That rotation is now
+        // disabled for DEEPSEEK4 (see llama-kv-cache.cpp), so quantized K works. Keep only an
+        // informational note that incoherence pre-processing is off for this model's quantized cache.
         if (model->arch == LLM_ARCH_DEEPSEEK4 &&
                 model->hparams.n_embd_head_k() + model->hparams.n_rot() == 576 &&
-                !model->hparams.no_alloc &&
-                params.offload_kqv &&
-                llama_model_has_cuda_cc(*model, 700)) {
-            LLAMA_LOG_ERROR("%s: quantized K-cache is numerically broken on sm_70 for DeepSeek MLA; use --cache-type-k f16\n", __func__);
-            return nullptr;
+                ggml_is_quantized(params.type_k) &&
+                !model->hparams.no_alloc) {
+            LLAMA_LOG_WARN("%s: DeepSeek-V4 quantized K-cache runs without Hadamard incoherence pre-processing (disabled to keep the sparse attention path correct); use --cache-type-k f16 for maximum accuracy\n", __func__);
         }
     }
 
