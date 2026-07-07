@@ -76,6 +76,12 @@ class MiniMaxM3Model(TextModel):
         self.gguf_writer.add_expert_weights_scale(self.find_hparam(["routed_scaling_factor"]))
         self.gguf_writer.add_expert_weights_norm(True)
 
+        sparse_cfg = self.hparams.get("sparse_attention_config") or {}
+        if sparse_cfg.get("use_sparse_attention"):
+            self.gguf_writer.add_indexer_head_count(sparse_cfg["sparse_num_index_heads"])
+            self.gguf_writer.add_indexer_key_length(sparse_cfg["sparse_index_dim"])
+            self.gguf_writer.add_indexer_top_k(sparse_cfg["sparse_topk_blocks"])
+
         # leading dense layers: moe_layer_freq (ints) or mlp_layer_types (Transformers 5.12, strings)
         moe_layer_freq = self.find_hparam(["moe_layer_freq", "mlp_layer_types"])
         n_dense = 0
@@ -87,8 +93,8 @@ class MiniMaxM3Model(TextModel):
         self.gguf_writer.add_leading_dense_block_count(n_dense)
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None):
-        # text-only: drop vision, projector, patch-merge and sparse-attention index tensors
-        if name.startswith(("vision_tower", "multi_modal_projector", "patch_merge_mlp")) or ".index_" in name:
+        # text-only: drop vision, projector and patch-merge tensors
+        if name.startswith(("vision_tower", "multi_modal_projector", "patch_merge_mlp")):
             return
 
         # strip VL wrapper prefix to match tensor_mapping names

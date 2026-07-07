@@ -509,6 +509,7 @@ struct llama_layer {
     struct ggml_tensor * ssm_o_norm = nullptr;
 
     // DSA (deepseek sparse attention)
+    struct ggml_tensor * indexer_q_norm   = nullptr;
     struct ggml_tensor * indexer_k_norm   = nullptr;
     struct ggml_tensor * indexer_k_norm_b = nullptr;
     struct ggml_tensor * indexer_proj     = nullptr;

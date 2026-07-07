@@ -1262,8 +1262,13 @@ class TensorNameMap:
             "model.layers.{bid}.self_attn.vision_expert_query_key_value",  # cogvlm
         ),
 
+        MODEL_TENSOR.INDEXER_Q_NORM: (
+            "model.layers.{bid}.self_attn.index_q_norm", # MiniMax-M3 MSA
+        ),
+
         MODEL_TENSOR.INDEXER_K_NORM: (
             "model.layers.{bid}.self_attn.indexer.k_norm", # DSA
+            "model.layers.{bid}.self_attn.index_k_norm", # MiniMax-M3 MSA
         ),
 
         MODEL_TENSOR.INDEXER_PROJ: (
@@ -1272,10 +1277,12 @@ class TensorNameMap:
 
         MODEL_TENSOR.INDEXER_ATTN_K: (
             "model.layers.{bid}.self_attn.indexer.wk", # DSA
+            "model.layers.{bid}.self_attn.index_k_proj", # MiniMax-M3 MSA
         ),
 
         MODEL_TENSOR.INDEXER_ATTN_Q_B: (
             "model.layers.{bid}.self_attn.indexer.wq_b", # DSA
+            "model.layers.{bid}.self_attn.index_q_proj", # MiniMax-M3 MSA
         ),
 
         ############################################################################

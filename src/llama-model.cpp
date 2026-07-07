@@ -25,6 +25,7 @@
 #include <cassert>
 #include <cfloat>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <cmath>
 #include <functional>
@@ -35,6 +36,11 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+static bool llama_env_enabled(const char * name) {
+    const char * value = getenv(name);
+    return value && atoi(value) != 0;
+}
 
 static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params & params) {
     switch (arch) {
@@ -2180,7 +2186,23 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         }
                     }
 
-                    if (arch == LLM_ARCH_DEEPSEEK4) {
+                    if (arch == LLM_ARCH_MINIMAX_M3 && llama_env_enabled("LLAMA_MINIMAX_M3_MSA") &&
+                            hparams.indexer_n_head > 0 && hparams.indexer_head_size > 0 && hparams.indexer_top_k > 0) {
+                        res = new llama_kv_cache_dsa(
+                                *this,
+                                params.type_k,
+                                params.type_v,
+                                !cparams.flash_attn,
+                                cparams.offload_kqv,
+                                cparams.kv_unified,
+                                cparams.n_ctx_seq,
+                                cparams.n_seq_max,
+                                1,
+                                hparams.n_swa,
+                                hparams.swa_type,
+                                filter,
+                                reuse);
+                    } else if (arch == LLM_ARCH_DEEPSEEK4) {
                         GGML_ASSERT(hparams.swa_type != LLAMA_SWA_TYPE_NONE);
 
                         res = new llama_kv_cache_dsv4(

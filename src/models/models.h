@@ -1877,6 +1877,16 @@ struct llama_model_minimax_m3 : public llama_model_base {
 
     struct graph : public llm_graph_context {
         graph(const llama_model & model, const llm_graph_params & params);
+
+        ggml_tensor * build_msa_attn(
+                const llama_model & model,
+                llm_graph_input_attn_k_dsa * inp,
+                ggml_tensor * attn_inp,
+                ggml_tensor * q_cur,
+                ggml_tensor * k_cur,
+                ggml_tensor * v_cur,
+                float kq_scale,
+                int il) const;
     };
 
     std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;

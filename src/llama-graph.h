@@ -394,12 +394,14 @@ public:
     bool can_reuse(const llm_graph_params & params) override;
 
     ggml_tensor * get_k_idxs_mla() const { return self_k_idxs_mla; }
+    ggml_tensor * get_v_idxs_mla() const { return self_v_idxs_mla; }
     ggml_tensor * get_k_idxs_lid() const { return self_k_idxs_lid; }
 
     ggml_tensor * get_kq_mask_mla() const { return self_kq_mask_mla_cnv; }
     ggml_tensor * get_kq_mask_lid() const { return self_kq_mask_lid; }
 
     ggml_tensor * self_k_idxs_mla = nullptr; // I64 [n_batch]
+    ggml_tensor * self_v_idxs_mla = nullptr; // I64 [n_batch]
     ggml_tensor * self_k_idxs_lid = nullptr; // I64 [n_batch]
 
     ggml_tensor * self_kq_mask_mla     = nullptr; // F32/F16 [n_kv, n_batch/n_stream, 1, n_stream]

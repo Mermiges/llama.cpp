@@ -39,8 +39,9 @@ llama_kv_cache_dsa::llama_kv_cache_dsa(
     // indexer key cache tensors with correct dimensions
     // https://github.com/ggml-org/llama.cpp/pull/21149#discussion_r3015940823
 
-    // DSA lightning indexer uses MQA with single key head
-    std::fill(hparams_lid.n_head_kv_arr.begin(), hparams_lid.n_head_kv_arr.end(), 1);
+    // DSA lightning indexer uses MQA; MiniMax-M3 MSA keeps multiple index heads.
+    const uint32_t n_head_lid = model.arch == LLM_ARCH_MINIMAX_M3 ? model.hparams.indexer_n_head : 1;
+    std::fill(hparams_lid.n_head_kv_arr.begin(), hparams_lid.n_head_kv_arr.end(), n_head_lid);
     hparams_lid.n_embd_head_k_full = model.hparams.indexer_head_size;
     hparams_lid.rope_type          = LLAMA_ROPE_TYPE_NEOX;
 
