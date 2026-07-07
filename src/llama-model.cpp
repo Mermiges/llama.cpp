@@ -429,6 +429,17 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
     };
 
     auto get_tensor_config = [&]() -> tensor_config {
+        // DS4TP hybrid: DeepSeek-V4 is pure-MoE with MLA (1 KV head) + a LoRA-factored output
+        // projection (attn_out_a/attn_out_b, NOT "attn_output.weight") and a sparse lightning
+        // indexer. The generic rules below route the MLA kv-cache / qk_norm / sinks to key off a
+        // non-existent "attn_output.weight" and assert (llama-model.cpp:424). MLA is also
+        // un-splittable head-wise (single KV head) and cheap enough to replicate. So for DS4 we
+        // tensor-split ONLY the routed-expert FFN (ffn_*_exps) and MIRROR everything else — the
+        // exact experts-split / attention-replicated hybrid. The _exps tensors fall through to the
+        // FFN rules (which carry a "_exps" fallback and never hit the null-suffix assert).
+        if (ud->model->arch == LLM_ARCH_DEEPSEEK4 && tensor_name.find("_exps") == std::string::npos) {
+            return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_MIRRORED);
+        }
         // standard attention
         if (std::regex_match(tensor_name, pattern_q_weight) || std::regex_match(tensor_name, pattern_kv_weight)) {
             return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_1, "attn_output.weight", "ssm_out.weight");
