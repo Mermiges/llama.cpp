@@ -33,6 +33,7 @@
 #include "ggml-cuda/mmvf.cuh"
 #include "ggml-cuda/mmvq.cuh"
 #include "ggml-cuda/msa-block-ids.cuh"
+#include "ggml-cuda/lightning-indexer.cuh"
 #include "ggml-cuda/norm.cuh"
 #include "ggml-cuda/opt-step-adamw.cuh"
 #include "ggml-cuda/opt-step-sgd.cuh"
@@ -2204,6 +2205,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             break;
         case GGML_OP_MSA_BLOCK_IDS_TO_ROWS:
             ggml_cuda_op_msa_block_ids_to_rows(ctx, dst);
+            break;
+        case GGML_OP_LIGHTNING_INDEXER:
+            ggml_cuda_op_lightning_indexer(ctx, dst);
             break;
         case GGML_OP_ARGSORT:
             ggml_cuda_op_argsort(ctx, dst);
@@ -4619,6 +4623,31 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
 #endif
         case GGML_OP_MSA_BLOCK_IDS_TO_ROWS:
             return op->src[0]->type == GGML_TYPE_I32 && op->type == GGML_TYPE_I32;
+        case GGML_OP_LIGHTNING_INDEXER:
+            {
+                // kernel is instantiated only for n_embd=128, n_head=64 and these K types
+                if (op->type != GGML_TYPE_F32 ||
+                    op->src[0]->type != GGML_TYPE_F32 ||
+                    op->src[2]->type != GGML_TYPE_F32) {
+                    return false;
+                }
+                if (op->src[0]->ne[0] != 128 || op->src[0]->ne[1] != 64) {
+                    return false;
+                }
+                switch (op->src[1]->type) {
+                    case GGML_TYPE_F16:
+                    case GGML_TYPE_F32:
+                    case GGML_TYPE_BF16:
+                    case GGML_TYPE_Q4_0:
+                    case GGML_TYPE_Q4_1:
+                    case GGML_TYPE_Q5_0:
+                    case GGML_TYPE_Q5_1:
+                    case GGML_TYPE_Q8_0:
+                        return true;
+                    default:
+                        return false;
+                }
+            }
         case GGML_OP_SUM_ROWS:
         case GGML_OP_MEAN:
         case GGML_OP_GROUP_NORM:

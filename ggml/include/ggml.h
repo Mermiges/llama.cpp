@@ -552,6 +552,7 @@ extern "C" {
         GGML_OP_ARGSORT,
         GGML_OP_TOP_K,
         GGML_OP_MSA_BLOCK_IDS_TO_ROWS,
+        GGML_OP_LIGHTNING_INDEXER,
         GGML_OP_LEAKY_RELU,
         GGML_OP_TRI,
         GGML_OP_FILL,
@@ -2395,6 +2396,20 @@ extern "C" {
             struct ggml_tensor  * block_ids,
             int                   block_size,
             int                   n_head);
+
+    // DeepSeek lightning indexer: fused per-token sparse-attention scoring.
+    //   q:       [n_embd, n_head, n_batch, n_stream]  F32
+    //   k:       [n_embd, 1,      n_kv,    n_stream]  F16/F32/BF16/quant
+    //   weights: [n_head, n_batch, 1,      n_stream]  F32
+    //   result:  [n_kv,   n_batch, 1,      n_stream]  F32
+    //   result[kv,t] = scale_heads * sum_h weights[h] * relu(scale_embd * (q_h . k_kv))
+    GGML_API struct ggml_tensor * ggml_lightning_indexer(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q,
+            struct ggml_tensor  * k,
+            struct ggml_tensor  * weights,
+            float                 scale_embd,
+            float                 scale_heads);
 
     GGML_API struct ggml_tensor * ggml_arange(
             struct ggml_context * ctx,

@@ -1983,6 +1983,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_msa_block_ids_to_rows(params, tensor);
             } break;
+        case GGML_OP_LIGHTNING_INDEXER:
+            {
+                ggml_compute_forward_lightning_indexer(params, tensor);
+            } break;
         case GGML_OP_LEAKY_RELU:
             {
                 ggml_compute_forward_leaky_relu(params, tensor);
@@ -2375,6 +2379,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_ARGSORT:
         case GGML_OP_TOP_K:
         case GGML_OP_MSA_BLOCK_IDS_TO_ROWS:
+        case GGML_OP_LIGHTNING_INDEXER:
         case GGML_OP_FLASH_ATTN_EXT:
         case GGML_OP_FLASH_ATTN_BACK:
         case GGML_OP_SSM_CONV:
@@ -2914,6 +2919,13 @@ struct ggml_cplan ggml_graph_plan(
                 case GGML_OP_TOP_K:
                     {
                         cur += sizeof(int32_t)*node->src[0]->ne[0]*n_tasks;
+                    } break;
+                case GGML_OP_LIGHTNING_INDEXER:
+                    {
+                        // per-thread scratch for dequantizing one K row to float;
+                        // stride (n_embd + CACHE_LINE_SIZE_F32) must match ops.cpp indexing.
+                        const int64_t n_embd = node->src[1]->ne[0];
+                        cur += sizeof(float)*(n_embd + CACHE_LINE_SIZE_F32)*n_tasks;
                     } break;
                 case GGML_OP_FLASH_ATTN_EXT:
                     {
