@@ -1044,6 +1044,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "TIMESTEP_EMBEDDING",
     "ARGSORT",
     "TOP_K",
+    "MSA_BLOCK_IDS_TO_ROWS",
     "LEAKY_RELU",
     "TRI",
     "FILL",
@@ -1078,7 +1079,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 97, "GGML_OP_COUNT != 97");
+static_assert(GGML_OP_COUNT == 98, "GGML_OP_COUNT != 98");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1155,6 +1156,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "timestep_embedding(timesteps, dim, max_period)",
     "argsort(x)",
     "top_k(x)",
+    "msa_block_ids_to_rows(x)",
     "leaky_relu(x)",
     "tri(x)",
     "fill(x, c)",
@@ -1189,7 +1191,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 97, "GGML_OP_COUNT != 97");
+static_assert(GGML_OP_COUNT == 98, "GGML_OP_COUNT != 98");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -5332,6 +5334,31 @@ struct ggml_tensor * ggml_top_k(
 
     result->op     = GGML_OP_TOP_K;
     result->src[0] = a;
+
+    return result;
+}
+
+// ggml_msa_block_ids_to_rows
+
+struct ggml_tensor * ggml_msa_block_ids_to_rows(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * block_ids,
+        int                   block_size,
+        int                   n_head) {
+    GGML_ASSERT(block_ids->type == GGML_TYPE_I32);
+    GGML_ASSERT(block_ids->ne[1] == 1);
+    GGML_ASSERT(block_ids->ne[2] == 1);
+    GGML_ASSERT(block_ids->ne[3] >= 1);
+    GGML_ASSERT(block_size > 0);
+    GGML_ASSERT(n_head > 0);
+
+    struct ggml_tensor * result = ggml_new_tensor_4d(ctx, GGML_TYPE_I32, block_ids->ne[0]*block_size, n_head, block_ids->ne[3], 1);
+
+    ggml_set_op_params_i32(result, 0, block_size);
+    ggml_set_op_params_i32(result, 1, n_head);
+
+    result->op     = GGML_OP_MSA_BLOCK_IDS_TO_ROWS;
+    result->src[0] = block_ids;
 
     return result;
 }

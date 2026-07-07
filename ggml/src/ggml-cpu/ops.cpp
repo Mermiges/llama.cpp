@@ -8356,6 +8356,62 @@ void ggml_compute_forward_top_k(
     }
 }
 
+// ggml_compute_forward_msa_block_ids_to_rows
+
+static void ggml_compute_forward_msa_block_ids_to_rows_i32(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+
+    GGML_ASSERT(src0->type == GGML_TYPE_I32);
+    GGML_ASSERT(dst->type == GGML_TYPE_I32);
+
+    const int32_t block_size = ggml_get_op_params_i32(dst, 0);
+    const int32_t n_head     = ggml_get_op_params_i32(dst, 1);
+
+    GGML_ASSERT(block_size > 0);
+    GGML_ASSERT(n_head == dst->ne[1]);
+    GGML_ASSERT(src0->ne[1] == 1);
+    GGML_ASSERT(src0->ne[2] == 1);
+    GGML_ASSERT(src0->ne[3] == dst->ne[2]);
+    GGML_ASSERT(src0->ne[0]*block_size == dst->ne[0]);
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    const int64_t ne = ggml_nelements(dst);
+
+    for (int64_t i = ith; i < ne; i += nth) {
+        const int64_t i0 = i % dst->ne[0];
+        const int64_t i1 = (i / dst->ne[0]) % dst->ne[1];
+        const int64_t i2 = (i / (dst->ne[0]*dst->ne[1])) % dst->ne[2];
+
+        const int64_t itop = i0 / block_size;
+        const int64_t ib   = i0 % block_size;
+
+        const int32_t block_id = *(const int32_t *) ((const char *) src0->data + itop*src0->nb[0] + i2*src0->nb[3]);
+
+        *(int32_t *) ((char *) dst->data + i0*dst->nb[0] + i1*dst->nb[1] + i2*dst->nb[2]) = block_id*block_size + ib;
+    }
+}
+
+void ggml_compute_forward_msa_block_ids_to_rows(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+
+    switch (src0->type) {
+        case GGML_TYPE_I32:
+            {
+                ggml_compute_forward_msa_block_ids_to_rows_i32(params, dst);
+            } break;
+        default:
+            {
+                GGML_ABORT("fatal error");
+            }
+    }
+}
+
 static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
         const ggml_compute_params * params,
         ggml_tensor * dst,

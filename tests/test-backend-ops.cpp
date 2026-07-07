@@ -5732,6 +5732,144 @@ struct test_top_k : public test_case {
     }
 };
 
+// GGML_OP_MSA_BLOCK_IDS_TO_ROWS
+struct test_msa_block_ids_to_rows : public test_case {
+    const int n_blocks;
+    const int top_k;
+    const int block_size;
+    const int n_head;
+    const int n_stream;
+
+    std::string vars() override {
+        return VARS_TO_STR5(n_blocks, top_k, block_size, n_head, n_stream);
+    }
+
+    test_msa_block_ids_to_rows(int n_blocks = 8, int top_k = 3, int block_size = 128, int n_head = 4, int n_stream = 1)
+        : n_blocks(n_blocks), top_k(top_k), block_size(block_size), n_head(n_head), n_stream(n_stream) {}
+
+    double max_err() override {
+        return 0.0;
+    }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * block_ids = ggml_new_tensor_4d(ctx, GGML_TYPE_I32, top_k, 1, 1, n_stream);
+        ggml_set_name(block_ids, "block_ids");
+
+        ggml_tensor * out = ggml_msa_block_ids_to_rows(ctx, block_ids, block_size, n_head);
+        ggml_set_name(out, "out");
+
+        return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
+            if (strcmp(t->name, "block_ids") == 0) {
+                for (int s = 0; s < n_stream; ++s) {
+                    std::vector<int32_t> data(top_k);
+                    for (int i = 0; i < top_k; ++i) {
+                        data[i] = (i*3 + s) % n_blocks;
+                    }
+                    ggml_backend_tensor_set(t, data.data(), s*t->nb[3], top_k*sizeof(int32_t));
+                }
+            } else {
+                init_tensor_uniform(t);
+            }
+        }
+    }
+};
+
+struct test_msa_sparse_attn_dense_ref : public test_case {
+    const int hsk;
+    const int hsv;
+    const int n_head;
+    const int block_size;
+    const int n_blocks;
+
+    std::string op_desc(ggml_tensor * t) override {
+        GGML_UNUSED(t);
+        return "MSA_SPARSE_ATTN_DENSE_REF";
+    }
+
+    std::string vars() override {
+        return VARS_TO_STR5(hsk, hsv, n_head, block_size, n_blocks);
+    }
+
+    test_msa_sparse_attn_dense_ref(int hsk = 64, int hsv = 64, int n_head = 2, int block_size = 128, int n_blocks = 2)
+        : hsk(hsk), hsv(hsv), n_head(n_head), block_size(block_size), n_blocks(n_blocks) {}
+
+    double max_err() override {
+        return 2e-2;
+    }
+
+    double max_err(ggml_backend_t backend) override {
+        GGML_UNUSED(backend);
+        return max_err();
+    }
+
+    double err(const float * a, const float * b, size_t n) override {
+        double diff = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+            diff = std::max(diff, (double) std::fabs(a[i]));
+            diff = std::max(diff, (double) std::fabs(b[i]));
+            diff = std::max(diff, (double) std::fabs(a[i] - b[i]));
+        }
+        return diff;
+    }
+
+    bool run_whole_graph() override {
+        return true;
+    }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        const int kv = block_size*n_blocks;
+
+        ggml_tensor * q = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hsk, 1, n_head, 1);
+        ggml_set_name(q, "q");
+
+        ggml_tensor * k = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, hsk, kv, n_head, 1);
+        ggml_set_name(k, "k");
+
+        ggml_tensor * v = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, hsv, kv, n_head, 1);
+        ggml_set_name(v, "v");
+
+        ggml_tensor * block_scores = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, n_blocks, 1, 1, 1);
+        ggml_set_name(block_scores, "block_scores");
+
+        ggml_tensor * top_k_blocks = ggml_cont(ctx, ggml_top_k(ctx, block_scores, n_blocks));
+        ggml_tensor * rows = ggml_msa_block_ids_to_rows(ctx, top_k_blocks, block_size, n_head);
+
+        ggml_tensor * k_sparse = ggml_get_rows(ctx, k, rows);
+        ggml_tensor * v_sparse = ggml_get_rows(ctx, v, rows);
+
+        ggml_tensor * sparse = ggml_flash_attn_ext(ctx, q, k_sparse, v_sparse, nullptr, 1.0f/sqrtf((float) hsk), 0.0f, 0.0f);
+        ggml_flash_attn_ext_set_prec(sparse, GGML_PREC_F32);
+
+        ggml_tensor * dense = ggml_flash_attn_ext(ctx, q, k, v, nullptr, 1.0f/sqrtf((float) hsk), 0.0f, 0.0f);
+        ggml_flash_attn_ext_set_prec(dense, GGML_PREC_F32);
+
+        ggml_tensor * out = ggml_sub(ctx, sparse, dense);
+        ggml_set_name(out, "out");
+
+        return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
+            if (strcmp(t->name, "block_scores") == 0) {
+                std::vector<float> data(n_blocks);
+                for (int i = 0; i < n_blocks; ++i) {
+                    data[i] = (float) i;
+                }
+                ggml_backend_tensor_set(t, data.data(), 0, n_blocks*sizeof(float));
+            } else if (strcmp(t->name, "q") == 0 || strcmp(t->name, "k") == 0 || strcmp(t->name, "v") == 0) {
+                init_tensor_uniform(t, -0.5f, 0.5f);
+            } else {
+                init_tensor_uniform(t);
+            }
+        }
+    }
+};
+
 enum MoeGatingFunc {
     GATING_FUNC_SOFTMAX,
     GATING_FUNC_SIGMOID,
@@ -8972,6 +9110,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     //for (int i = 1; i < 9999; ++i) {
     //    test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {i, 2, 1, 3}, rand() % i + 1));
     //}
+
+    test_cases.emplace_back(new test_msa_block_ids_to_rows(8, 3, 128, 4, 1));
+    test_cases.emplace_back(new test_msa_block_ids_to_rows(5, 5, 16, 2, 2));
+    test_cases.emplace_back(new test_msa_sparse_attn_dense_ref(64, 64, 2, 128, 2));
 
     for (ggml_scale_mode mode : {GGML_SCALE_MODE_NEAREST, GGML_SCALE_MODE_BILINEAR, GGML_SCALE_MODE_BICUBIC, ggml_scale_mode(GGML_SCALE_MODE_BILINEAR | GGML_SCALE_FLAG_ANTIALIAS)}) {
         test_cases.emplace_back(new test_upscale(GGML_TYPE_F32, {512, 512, 3, 2}, 2, mode));

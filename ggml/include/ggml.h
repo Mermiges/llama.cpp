@@ -551,6 +551,7 @@ extern "C" {
         GGML_OP_TIMESTEP_EMBEDDING,
         GGML_OP_ARGSORT,
         GGML_OP_TOP_K,
+        GGML_OP_MSA_BLOCK_IDS_TO_ROWS,
         GGML_OP_LEAKY_RELU,
         GGML_OP_TRI,
         GGML_OP_FILL,
@@ -2388,6 +2389,12 @@ extern "C" {
             struct ggml_context * ctx,
             struct ggml_tensor  * a,
             int                   k);
+
+    GGML_API struct ggml_tensor * ggml_msa_block_ids_to_rows(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * block_ids,
+            int                   block_size,
+            int                   n_head);
 
     GGML_API struct ggml_tensor * ggml_arange(
             struct ggml_context * ctx,

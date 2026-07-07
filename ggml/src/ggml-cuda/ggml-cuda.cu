@@ -32,6 +32,7 @@
 #include "ggml-cuda/mmq.cuh"
 #include "ggml-cuda/mmvf.cuh"
 #include "ggml-cuda/mmvq.cuh"
+#include "ggml-cuda/msa-block-ids.cuh"
 #include "ggml-cuda/norm.cuh"
 #include "ggml-cuda/opt-step-adamw.cuh"
 #include "ggml-cuda/opt-step-sgd.cuh"
@@ -2200,6 +2201,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             break;
         case GGML_OP_TOP_K:
             ggml_cuda_op_top_k(ctx, dst);
+            break;
+        case GGML_OP_MSA_BLOCK_IDS_TO_ROWS:
+            ggml_cuda_op_msa_block_ids_to_rows(ctx, dst);
             break;
         case GGML_OP_ARGSORT:
             ggml_cuda_op_argsort(ctx, dst);
@@ -4605,6 +4609,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
 #else
             return true;
 #endif
+        case GGML_OP_MSA_BLOCK_IDS_TO_ROWS:
+            return op->src[0]->type == GGML_TYPE_I32 && op->type == GGML_TYPE_I32;
         case GGML_OP_SUM_ROWS:
         case GGML_OP_MEAN:
         case GGML_OP_GROUP_NORM:
