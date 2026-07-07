@@ -1,6 +1,7 @@
 #include "llama-context.h"
 
 #include "ggml.h"
+#include "ggml-backend.h"
 #include "llama-arch.h"
 #include "llama-graph.h"
 #include "llama-impl.h"
@@ -21,6 +22,31 @@
 //
 // llama_context
 //
+
+static bool llama_model_has_cuda_cc(const llama_model & model, int cc) {
+    using get_cuda_cc_fn = int (*)(int);
+
+    for (const auto & dev : model.devices) {
+        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev.dev);
+        if (strcmp(ggml_backend_reg_name(reg), "CUDA") != 0) {
+            continue;
+        }
+
+        auto get_cuda_cc = (get_cuda_cc_fn) ggml_backend_reg_get_proc_address(reg, "ggml_backend_cuda_get_device_compute_capability");
+        if (!get_cuda_cc) {
+            continue;
+        }
+
+        const size_t n_dev = ggml_backend_reg_dev_count(reg);
+        for (size_t i = 0; i < n_dev; ++i) {
+            if (ggml_backend_reg_dev_get(reg, i) == dev.dev && get_cuda_cc((int) i) == cc) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
 
 static llm_graph_type ctx_type_to_graph_type(llama_context_type ctx_type) {
     switch (ctx_type) {
@@ -3533,6 +3559,15 @@ llama_context * llama_init_from_model(
                     __func__, ggml_type_name(params.type_k), blck_size, model->hparams.n_embd_head_k(il));
                 return nullptr;
             }
+        }
+
+        if (model->arch == LLM_ARCH_DEEPSEEK4 &&
+                model->hparams.n_embd_head_k() + model->hparams.n_rot() == 576 &&
+                !model->hparams.no_alloc &&
+                params.offload_kqv &&
+                llama_model_has_cuda_cc(*model, 700)) {
+            LLAMA_LOG_ERROR("%s: quantized K-cache is numerically broken on sm_70 for DeepSeek MLA; use --cache-type-k f16\n", __func__);
+            return nullptr;
         }
     }
 
