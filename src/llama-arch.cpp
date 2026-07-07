@@ -977,6 +977,16 @@ bool llm_arch_supports_rs_rollback(const llm_arch & arch) {
 }
 
 bool llm_arch_supports_sm_tensor(const llm_arch & arch) {
+    // DS4TP experiment: DeepSeek-V4 (and the whole MLA/DeepSeek family) is blacklisted from
+    // SPLIT_MODE_TENSOR upstream because the split-state descriptor has no rules for the MLA
+    // tensors (attn_q_a/q_b/kv_a_mqa/kv_b/k_b/v_b) or the lightning-indexer tensors. Those
+    // unmatched tensors fall to the MIRRORED (replicated) default, which SHOULD be correct:
+    // attention runs replicated on every card while the fat MoE expert FFN (ffn_*_exps) is the
+    // only thing tensor-split + all-reduced. Gate the de-blacklist behind an env flag so the
+    // default stays exactly as upstream and this stays an opt-in experiment.
+    if (arch == LLM_ARCH_DEEPSEEK4 && getenv("LF_DS4_TP_EXPERIMENT") != nullptr) {
+        return true;
+    }
     switch (arch) {
         case LLM_ARCH_GROK:
         case LLM_ARCH_MPT:
