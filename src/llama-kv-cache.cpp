@@ -352,20 +352,15 @@ llama_kv_cache::llama_kv_cache(
             ggml_is_quantized(type_v) &&
             hparams.n_embd_head_v() % 64 == 0;
 
-        // DeepSeek-V4: the Hadamard incoherence rotation is not correctly integrated with this
-        // model's attention. Enabling it (which only happens for a quantized K/V cache) allocates
-        // self_k_rot, which forces every layer off the designed sparse CSA/HCA/lightning-indexer
-        // paths (they require self_k_rot==nullptr) onto build_raw_attention, whose rotation handling
-        // is broken (plain ggml_mul_mat instead of the block-wise ggml_mul_mat_aux, and no
-        // un-rotation of the MLA V-is-K-view output before the v_mla up-projection). The result is
-        // confident gibberish on ALL backends (verified CPU + CUDA/Volta). Until the sparse paths
-        // learn to apply/undo the rotation, disable it here so quantized K/V flows through the
-        // correct attention with plain (near-lossless) q8_0. f16 caches never enabled rotation, so
-        // they are unaffected. See exec-logs/2026-07-07-ds4kernel-fable-execlog.md.
-        if (model.arch == LLM_ARCH_DEEPSEEK4) {
-            attn_rot_k = false;
-            attn_rot_v = false;
-        }
+        // DeepSeek-V4: the Hadamard incoherence rotation (enabled for a quantized K/V cache) is
+        // now handled correctly by the model's attention builders (src/models/deepseek4.cpp):
+        // build_csa_lid_attention / build_hca_attention rotate Q and the raw/compressed K into the
+        // incoherence basis and un-rotate the attention output, and build_raw_attention uses the
+        // block-wise ggml_mul_mat_aux + output un-rotation. So rotation is left ENABLED here, which
+        // spreads quantization error and makes rotated q8_0-K numerically better than plain q8_0-K.
+        // LLAMA_ATTN_ROT_DISABLE=1 still turns every rotation off (bisect / emergency opt-out).
+        // Was previously force-disabled for this arch; see
+        // exec-logs/2026-07-07-ds4kernel-fable-execlog.md and 2026-07-07-ds4rot-fable-execlog.md.
     }
 
     LLAMA_LOG_INFO("%s: attn_rot_k = %d, n_embd_head_k_all = %d\n", __func__, attn_rot_k, n_embd_head_k_all);
